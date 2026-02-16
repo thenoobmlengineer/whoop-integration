@@ -5,12 +5,27 @@ const cors = require("cors");
 require("dotenv").config();
 
 const authRoutes = require("./routes/authRoutes");
+const webhookRoutes = require("./routes/webhookRoutes");
+
 const { getProfile } = require("./services/whoopApiService");
 
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+
+// Capture raw body for WHOOP webhook signature verification
+app.use(
+  express.json({
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
+
+// Optional root route so "/" doesn't show Cannot GET /
+app.get("/", (req, res) => {
+  res.send("WHOOP backend running. Try /health");
+});
 
 // Health check
 app.get("/health", (req, res) => {
@@ -19,6 +34,9 @@ app.get("/health", (req, res) => {
 
 // WHOOP OAuth routes
 app.use("/auth", authRoutes);
+
+// ✅ WHOOP Webhook routes (POST)
+app.use("/webhook", webhookRoutes);
 
 /**
  * DEV TEST ONLY:
@@ -31,7 +49,9 @@ app.get("/test/profile", async (req, res) => {
     const accessToken = req.query.token;
 
     if (!accessToken) {
-      return res.status(400).json({ ok: false, error: "Missing token query param" });
+      return res
+        .status(400)
+        .json({ ok: false, error: "Missing token query param" });
     }
 
     const data = await getProfile(accessToken);
@@ -48,4 +68,5 @@ app.get("/test/profile", async (req, res) => {
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Backend running on http://localhost:${PORT}`);
+  console.log("Webhook endpoint: POST /webhook/whoop");
 });
