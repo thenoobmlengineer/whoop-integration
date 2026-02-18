@@ -27,27 +27,27 @@ function verifyWhoopSignature({ clientSecret, timestamp, rawBody, providedSignat
   return timingSafeEqual(hmac, providedSignature);
 }
 
-// Store events in a JSON file for now
+// Store events in a persistent location (Render)
 function storeEventData(event) {
-  const filePath = path.join(__dirname, "whoop_events.json");
+  // Save to persistent location on Render
+  const filePath = path.join("/opt/render/project/src/backend/src/controllers", "whoop_events.json");
 
   console.log("Saving to file:", filePath); // Log the file path
 
   let events = [];
-  
-  // Check if the file exists
   if (fs.existsSync(filePath)) {
     events = JSON.parse(fs.readFileSync(filePath, "utf8"));
   }
 
-  events.push(event);  // Add new event
+  // Add new event
+  events.push(event);
 
   // Write back to the file
   try {
     fs.writeFileSync(filePath, JSON.stringify(events, null, 2)); // Save to file
     console.log("Event saved to whoop_events.json");
   } catch (err) {
-    console.error("Error writing to whoop_events.json:", err);  // Log any errors
+    console.error("Error writing to whoop_events.json:", err); // Log any errors
   }
 }
 
