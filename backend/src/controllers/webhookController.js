@@ -1,4 +1,6 @@
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 
 // WHOOP headers (per docs)
 const SIG_HEADER = "x-whoop-signature";
@@ -25,6 +27,23 @@ function verifyWhoopSignature({ clientSecret, timestamp, rawBody, providedSignat
   return timingSafeEqual(hmac, providedSignature);
 }
 
+// Store events in a JSON file for now
+function storeEventData(event) {
+  const filePath = path.join(__dirname, "whoop_events.json");
+
+  // Read existing data
+  let events = [];
+  if (fs.existsSync(filePath)) {
+    events = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  }
+
+  // Add new event
+  events.push(event);
+
+  // Write back to the file
+  fs.writeFileSync(filePath, JSON.stringify(events, null, 2));
+}
+
 exports.whoopWebhook = async (req, res) => {
   try {
     const providedSignature = req.headers[SIG_HEADER];
@@ -44,10 +63,11 @@ exports.whoopWebhook = async (req, res) => {
       return res.status(401).json({ ok: false, error: "Invalid WHOOP signature" });
     }
 
-    // At this point webhook is authentic.
     // The payload usually contains: user_id, type, id, trace_id
-    // Example events: sleep.updated, workout.updated, recovery.updated, etc.
     const event = req.body;
+
+    // Store event to file for now
+    storeEventData(event);
 
     // IMPORTANT: ACK fast. Do heavy work async (queue/worker) later.
     // For now we just log it.
