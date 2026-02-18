@@ -31,17 +31,24 @@ function verifyWhoopSignature({ clientSecret, timestamp, rawBody, providedSignat
 function storeEventData(event) {
   const filePath = path.join(__dirname, "whoop_events.json");
 
-  // Read existing data
+  console.log("Saving to file:", filePath); // Log the file path
+
   let events = [];
+  
+  // Check if the file exists
   if (fs.existsSync(filePath)) {
     events = JSON.parse(fs.readFileSync(filePath, "utf8"));
   }
 
-  // Add new event
-  events.push(event);
+  events.push(event);  // Add new event
 
   // Write back to the file
-  fs.writeFileSync(filePath, JSON.stringify(events, null, 2));
+  try {
+    fs.writeFileSync(filePath, JSON.stringify(events, null, 2)); // Save to file
+    console.log("Event saved to whoop_events.json");
+  } catch (err) {
+    console.error("Error writing to whoop_events.json:", err);  // Log any errors
+  }
 }
 
 exports.whoopWebhook = async (req, res) => {
@@ -49,7 +56,7 @@ exports.whoopWebhook = async (req, res) => {
     const providedSignature = req.headers[SIG_HEADER];
     const timestamp = req.headers[TS_HEADER];
 
-    // Bypass signature verification if 'test' field exists in the body
+    // Bypass signature verification if it's a test (manually triggered cURL)
     if (req.body && req.body.test) {
       console.log("Bypassing signature verification for manual test.");
     } else {
