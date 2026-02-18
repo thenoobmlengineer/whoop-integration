@@ -49,7 +49,7 @@ exports.whoopWebhook = async (req, res) => {
     const providedSignature = req.headers[SIG_HEADER];
     const timestamp = req.headers[TS_HEADER];
 
-    // Bypass signature verification if it's a test (manually triggered cURL)
+    // Bypass signature verification if 'test' field exists in the body
     if (req.body && req.body.test) {
       console.log("Bypassing signature verification for manual test.");
     } else {
