@@ -6,6 +6,7 @@ require("dotenv").config();
 
 const authRoutes = require("./routes/authRoutes");
 const webhookRoutes = require("./routes/webhookRoutes");
+const debugRoutes = require("./routes/debugRoutes");
 
 const { getProfile } = require("./services/whoopApiService");
 
@@ -38,6 +39,9 @@ app.use("/auth", authRoutes);
 // ✅ WHOOP Webhook routes (POST)
 app.use("/webhook", webhookRoutes);
 
+// ✅ Debug routes (GET)
+app.use("/debug", debugRoutes);
+
 /**
  * DEV TEST ONLY:
  * Pass access token as query param to validate API calls quickly.
@@ -69,4 +73,5 @@ const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Backend running on http://localhost:${PORT}`);
   console.log("Webhook endpoint: POST /webhook/whoop");
+  console.log("Debug endpoint: GET /debug/whoop-events?key=...&limit=...");
 });
