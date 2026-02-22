@@ -1,5 +1,5 @@
 // backend/src/index.js
-
+const db = require("./db");
 const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
@@ -66,6 +66,15 @@ app.get("/test/profile", async (req, res) => {
       error: "Failed",
       details: err?.response?.data || err.message,
     });
+  }
+});
+
+app.get("/health/db", async (req, res) => {
+  try {
+    const r = await db.query("select now() as now");
+    res.json({ ok: true, db_time: r.rows[0].now });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 
