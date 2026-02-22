@@ -78,6 +78,15 @@ app.get("/health/db", async (req, res) => {
   }
 });
 
+app.get("/_version", (req, res) => {
+  res.json({
+    ok: true,
+    commit: process.env.RENDER_GIT_COMMIT || "unknown",
+    time: new Date().toISOString(),
+    hasDbRoute: true,
+  });
+});
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Backend running on http://localhost:${PORT}`);
