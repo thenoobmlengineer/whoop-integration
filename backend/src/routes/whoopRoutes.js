@@ -2,6 +2,12 @@ const express = require("express");
 const router = express.Router();
 
 const { getByAppUserId } = require("../repositories/whoopConnectionRepo");
+const { backfill } = require("../controllers/whoopController");
+
+// optional quick check
+router.get("/health", (req, res) => {
+  res.json({ ok: true, service: "whoop-routes" });
+});
 
 // MVP: allow app_user_id via query for now (Option B)
 router.get("/connection", async (req, res) => {
@@ -12,9 +18,11 @@ router.get("/connection", async (req, res) => {
     }
 
     const row = await getByAppUserId(appUserId);
-    if (!row) return res.status(404).json({ ok: false, error: "No WHOOP connection found" });
+    if (!row) {
+      return res.status(404).json({ ok: false, error: "No WHOOP connection found" });
+    }
 
-    // Do not return tokens
+    // Do NOT return tokens
     return res.json({
       ok: true,
       connected: true,
@@ -28,5 +36,8 @@ router.get("/connection", async (req, res) => {
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
+
+// Backfill past data into DB
+router.post("/backfill", backfill);
 
 module.exports = router;
