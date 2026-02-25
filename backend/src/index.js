@@ -1,9 +1,12 @@
 // backend/src/index.js
-const db = require("./db");
+
 const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
 
+const db = require("./db");
+
+const whoopRoutes = require("./routes/whoopRoutes");
 const authRoutes = require("./routes/authRoutes");
 const webhookRoutes = require("./routes/webhookRoutes");
 const debugRoutes = require("./routes/debugRoutes");
@@ -32,6 +35,28 @@ app.get("/", (req, res) => {
 app.get("/health", (req, res) => {
   res.json({ ok: true, service: "whoop-backend" });
 });
+
+// DB health check
+app.get("/health/db", async (req, res) => {
+  try {
+    const r = await db.query("select now() as now");
+    res.json({ ok: true, db_time: r.rows[0].now });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Version check
+app.get("/_version", (req, res) => {
+  res.json({
+    ok: true,
+    commit: process.env.RENDER_GIT_COMMIT || "unknown",
+    time: new Date().toISOString(),
+  });
+});
+
+// ✅ WHOOP App-facing routes
+app.use("/whoop", whoopRoutes);
 
 // WHOOP OAuth routes
 app.use("/auth", authRoutes);
@@ -69,27 +94,10 @@ app.get("/test/profile", async (req, res) => {
   }
 });
 
-app.get("/health/db", async (req, res) => {
-  try {
-    const r = await db.query("select now() as now");
-    res.json({ ok: true, db_time: r.rows[0].now });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-app.get("/_version", (req, res) => {
-  res.json({
-    ok: true,
-    commit: process.env.RENDER_GIT_COMMIT || "unknown",
-    time: new Date().toISOString(),
-    hasDbRoute: true,
-  });
-});
-
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Backend running on http://localhost:${PORT}`);
   console.log("Webhook endpoint: POST /webhook/whoop");
   console.log("Debug endpoint: GET /debug/whoop-events?key=...&limit=...");
+  console.log("Whoop endpoint: GET /whoop/connection?app_user_id=...");
 });
