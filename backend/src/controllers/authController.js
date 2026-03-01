@@ -130,6 +130,7 @@ exports.whoopCallback = async (req, res) => {
     });
 
     const tokens = tokenResp.data;
+    console.log("WHOOP TOKEN RESPONSE:", tokens);
     const accessToken = tokens.access_token;
     const refreshToken = tokens.refresh_token || null;
     const expiresIn = tokens.expires_in; // seconds
