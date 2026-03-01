@@ -1,12 +1,25 @@
 const crypto = require("crypto");
-const fs = require("fs");
-const path = require("path");
+const { getByWhoopUserId } = require("../repositories/whoopConnectionRepo");
+const {
+  getWorkoutById,
+  getSleepById,
+  getRecoveryById,
+  getCycleById,
+} = require("../services/whoopApiService");
 
-// WHOOP headers (per docs)
+const {
+  upsertWorkout,
+  upsertSleep,
+  upsertRecovery,
+  upsertCycle,
+} = require("../repositories/whoopDataRepo");
+
+const db = require("../db");
+
+// WHOOP headers
 const SIG_HEADER = "x-whoop-signature";
 const TS_HEADER = "x-whoop-signature-timestamp";
 
-// timing safe compare
 function timingSafeEqual(a, b) {
   const aBuf = Buffer.from(a || "", "utf8");
   const bBuf = Buffer.from(b || "", "utf8");
@@ -21,33 +34,84 @@ function timingSafeEqual(a, b) {
  */
 function verifyWhoopSignature({ clientSecret, timestamp, rawBody, providedSignature }) {
   if (!clientSecret || !timestamp || !rawBody || !providedSignature) return false;
-
   const message = Buffer.concat([Buffer.from(timestamp, "utf8"), rawBody]);
   const hmac = crypto.createHmac("sha256", clientSecret).update(message).digest("base64");
   return timingSafeEqual(hmac, providedSignature);
 }
 
-// Store events in a persistent location (Render)
-function storeEventData(event) {
-  // Save to persistent location on Render
-  const filePath = path.join("/opt/render/project/src/backend/src/controllers", "whoop_events.json");
+async function saveWebhookEvent(event) {
+  // store raw webhook in whoop_webhook_events
+  const sql = `
+    insert into whoop_webhook_events (trace_id, whoop_user_id, type, object_id, payload, received_at)
+    values ($1,$2,$3,$4,$5,now())
+    on conflict do nothing
+  `;
+  const traceId = event.trace_id || null;
+  const whoopUserId = String(event.user_id || "");
+  const type = event.type || null;
+  const objectId = event.id ? String(event.id) : (event.object_id ? String(event.object_id) : null);
 
-  console.log("Saving to file:", filePath); // Log the file path
+  await db.query(sql, [traceId, whoopUserId, type, objectId, event]);
+}
 
-  let events = [];
-  if (fs.existsSync(filePath)) {
-    events = JSON.parse(fs.readFileSync(filePath, "utf8"));
+async function fetchAndUpsert({ accessToken, whoopUserId, type, objectId }) {
+  if (!type || !objectId) return;
+
+  // You may see types like:
+  // workout.updated, sleep.updated, recovery.updated, cycle.updated
+  if (type.startsWith("workout")) {
+    const w = await getWorkoutById(accessToken, objectId);
+    const obj = w?.record || w?.data || w;
+    const id = String(obj.id || objectId);
+    await upsertWorkout({
+      id,
+      whoopUserId,
+      startTime: obj.start || obj.start_time || null,
+      endTime: obj.end || obj.end_time || null,
+      raw: obj,
+    });
+    return;
   }
 
-  // Add new event
-  events.push(event);
+  if (type.startsWith("sleep")) {
+    const s = await getSleepById(accessToken, objectId);
+    const obj = s?.record || s?.data || s;
+    const id = String(obj.id || objectId);
+    await upsertSleep({
+      id,
+      whoopUserId,
+      startTime: obj.start || obj.start_time || null,
+      endTime: obj.end || obj.end_time || null,
+      raw: obj,
+    });
+    return;
+  }
 
-  // Write back to the file
-  try {
-    fs.writeFileSync(filePath, JSON.stringify(events, null, 2)); // Save to file
-    console.log("Event saved to whoop_events.json");
-  } catch (err) {
-    console.error("Error writing to whoop_events.json:", err); // Log any errors
+  if (type.startsWith("recovery")) {
+    const r = await getRecoveryById(accessToken, objectId);
+    const obj = r?.record || r?.data || r;
+    const id = String(obj.id || objectId);
+    await upsertRecovery({
+      id,
+      whoopUserId,
+      cycleId: obj.cycle_id || null,
+      raw: obj,
+    });
+    return;
+  }
+
+  if (type.startsWith("cycle")) {
+    const c = await getCycleById(accessToken, objectId);
+    const obj = c?.record || c?.data || c;
+    const id = String(obj.id || objectId);
+    await upsertCycle({
+      id,
+      whoopUserId,
+      startTime: obj.start || obj.start_time || null,
+      endTime: obj.end || obj.end_time || null,
+      raw: obj,
+    });
+    return;
   }
 }
 
@@ -55,35 +119,48 @@ exports.whoopWebhook = async (req, res) => {
   try {
     const providedSignature = req.headers[SIG_HEADER];
     const timestamp = req.headers[TS_HEADER];
+    const rawBody = req.rawBody;
 
-    // Bypass signature verification if it's a test (manually triggered cURL)
-    if (req.body && req.body.test) {
-      console.log("Bypassing signature verification for manual test.");
-    } else {
-      const rawBody = req.rawBody;
+    const isManualTest = req.query?.test === "1" || req.body?.test === true;
 
+    // Signature check (skip only for manual tests)
+    if (!isManualTest) {
       const ok = verifyWhoopSignature({
         clientSecret: process.env.WHOOP_CLIENT_SECRET,
         timestamp,
         rawBody,
         providedSignature,
       });
-
       if (!ok) {
         return res.status(401).json({ ok: false, error: "Invalid WHOOP signature" });
       }
     }
 
-    // The payload usually contains: user_id, type, id, trace_id
     const event = req.body;
+    await saveWebhookEvent(event);
 
-    // Store event to file for now
-    storeEventData(event);
+    // ACK fast
+    res.status(200).json({ ok: true });
 
-    // IMPORTANT: ACK fast. Do heavy work async (queue/worker) later.
-    console.log("Received WHOOP event:", JSON.stringify(event));
+    // Async follow-up (fetch full object and upsert)
+    try {
+      const whoopUserId = String(event.user_id || "");
+      const type = event.type || "";
+      const objectId = event.id ? String(event.id) : (event.object_id ? String(event.object_id) : null);
+      if (!whoopUserId || !type || !objectId) return;
 
-    return res.status(200).json({ ok: true });
+      const conn = await getByWhoopUserId(whoopUserId);
+      if (!conn?.access_token) return;
+
+      await fetchAndUpsert({
+        accessToken: conn.access_token,
+        whoopUserId,
+        type,
+        objectId,
+      });
+    } catch (e) {
+      console.error("Webhook follow-up fetch failed:", e?.response?.data || e.message);
+    }
   } catch (err) {
     console.error("Webhook error:", err);
     return res.status(500).json({ ok: false, error: "Server error" });
