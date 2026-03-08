@@ -13,30 +13,40 @@ const {
   upsertCycle,
 } = require("../repositories/whoopDataRepo");
 
+const { getValidAccessTokenForAppUser } = require("../services/whoopTokenService");
+
 function isoDaysAgo(days) {
   return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 }
 
-// Normalize WHOOP response shape safely
 function toItems(resp) {
   return resp?.records || resp?.data || resp?.items || resp || [];
 }
 
-// Best-effort extract id/start/end fields from WHOOP objects
 function getId(obj, fallback) {
-  return String(obj?.id || obj?.workout_id || obj?.sleep_id || obj?.cycle_id || obj?.recovery_id || obj?.uuid || fallback || "");
+  return String(
+    obj?.id ||
+      obj?.workout_id ||
+      obj?.sleep_id ||
+      obj?.cycle_id ||
+      obj?.recovery_id ||
+      obj?.uuid ||
+      fallback ||
+      ""
+  );
 }
 
 function getStart(obj) {
   return obj?.start_time || obj?.start || obj?.start_at || obj?.start_datetime || null;
 }
+
 function getEnd(obj) {
   return obj?.end_time || obj?.end || obj?.end_at || obj?.end_datetime || null;
 }
 
 /**
  * POST /whoop/backfill?app_user_id=USER123&days=30
- * Production default: 30 days (max 30)
+ * Production default: 30 days
  */
 exports.backfill = async (req, res) => {
   try {
@@ -45,7 +55,6 @@ exports.backfill = async (req, res) => {
       return res.status(400).json({ ok: false, error: "Missing app_user_id" });
     }
 
-    // Default to 30, clamp to <= 30 as you requested
     let days = parseInt(req.query.days || "30", 10);
     if (Number.isNaN(days)) days = 30;
     if (days < 1) days = 1;
@@ -56,20 +65,18 @@ exports.backfill = async (req, res) => {
       return res.status(404).json({ ok: false, error: "No WHOOP connection" });
     }
 
-    const accessToken = conn.access_token;
+    const accessToken = await getValidAccessTokenForAppUser(conn);
     const whoopUserId = conn.whoop_user_id;
 
     const startTime = isoDaysAgo(days);
     const endTime = new Date().toISOString();
 
-    // Some APIs use start/end, some use start_time/end_time.
-    // We send both; unknown keys are usually ignored.
     const params = {
       start: startTime,
       end: endTime,
       start_time: startTime,
       end_time: endTime,
-      limit: 100, // safe default if supported
+      limit: 100,
     };
 
     const [workoutsResp, sleepsResp, recoveriesResp, cyclesResp] =
@@ -85,7 +92,6 @@ exports.backfill = async (req, res) => {
     const recoveryItems = toItems(recoveriesResp);
     const cycleItems = toItems(cyclesResp);
 
-    // Upsert into DB
     for (const w of workoutItems) {
       const id = getId(w);
       if (!id) continue;
@@ -140,7 +146,10 @@ exports.backfill = async (req, res) => {
     return res.json({
       ok: true,
       backfilled_days: days,
-      range: { start_time: startTime, end_time: endTime },
+      range: {
+        start_time: startTime,
+        end_time: endTime,
+      },
       counts: {
         workouts: workoutItems.length,
         sleeps: sleepItems.length,

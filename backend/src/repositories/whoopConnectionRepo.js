@@ -57,7 +57,6 @@ async function getByAppUserId(appUserId) {
 
 /**
  * Get connection by WHOOP user id
- * Used in webhook processing
  */
 async function getByWhoopUserId(whoopUserId) {
   const res = await db.query(
@@ -67,8 +66,74 @@ async function getByWhoopUserId(whoopUserId) {
   return res.rows[0] || null;
 }
 
+/**
+ * Update tokens by app user id
+ */
+async function updateTokensByAppUserId({
+  appUserId,
+  accessToken,
+  refreshToken,
+  expiresAt,
+  scopes,
+}) {
+  const sql = `
+    update whoop_connections
+    set access_token = $2,
+        refresh_token = coalesce($3, refresh_token),
+        expires_at = $4,
+        scopes = coalesce($5, scopes),
+        updated_at = now()
+    where app_user_id = $1
+    returning *;
+  `;
+
+  const res = await db.query(sql, [
+    String(appUserId),
+    accessToken,
+    refreshToken || null,
+    expiresAt || null,
+    scopes || null,
+  ]);
+
+  return res.rows[0] || null;
+}
+
+/**
+ * Update tokens by WHOOP user id
+ */
+async function updateTokensByWhoopUserId({
+  whoopUserId,
+  accessToken,
+  refreshToken,
+  expiresAt,
+  scopes,
+}) {
+  const sql = `
+    update whoop_connections
+    set access_token = $2,
+        refresh_token = coalesce($3, refresh_token),
+        expires_at = $4,
+        scopes = coalesce($5, scopes),
+        updated_at = now()
+    where whoop_user_id = $1
+    returning *;
+  `;
+
+  const res = await db.query(sql, [
+    String(whoopUserId),
+    accessToken,
+    refreshToken || null,
+    expiresAt || null,
+    scopes || null,
+  ]);
+
+  return res.rows[0] || null;
+}
+
 module.exports = {
   upsertConnection,
   getByAppUserId,
   getByWhoopUserId,
+  updateTokensByAppUserId,
+  updateTokensByWhoopUserId,
 };
