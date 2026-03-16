@@ -5,13 +5,15 @@ const { getByWhoopUserId } = require("../repositories/whoopConnectionRepo");
 const {
   getWorkoutById,
   getSleepById,
-  getRecoveryById,
+  getRecoveries,
+  getCycles,
 } = require("../services/whoopApiService");
 
 const {
   upsertWorkout,
   upsertSleep,
   upsertRecovery,
+  upsertCycle,
 } = require("../repositories/whoopDataRepo");
 
 const { getValidAccessTokenForWhoopUser } = require("../services/whoopTokenService");
@@ -53,6 +55,97 @@ async function saveWebhookEvent(event) {
   `;
 
   await db.query(sql, [traceId, whoopUserId, type, objectId, event]);
+}
+
+function toItems(resp) {
+  return resp?.records || resp?.data || resp?.items || resp || [];
+}
+
+function getId(obj, fallback) {
+  return String(
+    obj?.id ||
+      obj?.workout_id ||
+      obj?.sleep_id ||
+      obj?.cycle_id ||
+      obj?.recovery_id ||
+      obj?.uuid ||
+      fallback ||
+      ""
+  );
+}
+
+function getStart(obj) {
+  return obj?.start_time || obj?.start || obj?.start_at || obj?.start_datetime || null;
+}
+
+function getEnd(obj) {
+  return obj?.end_time || obj?.end || obj?.end_at || obj?.end_datetime || null;
+}
+
+function isoHoursAgo(hours) {
+  return new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+}
+
+/**
+ * WHOOP does not send cycle webhooks, and recovery.updated in v2 uses the associated
+ * sleep UUID, not a recovery ID. So for recovery/cycle freshness we do a small recent sync.
+ */
+async function syncRecentRecoveriesAndCycles({ accessToken, whoopUserId, hours = 48 }) {
+  const startTime = isoHoursAgo(hours);
+  const endTime = new Date().toISOString();
+
+  const params = {
+    start: startTime,
+    end: endTime,
+    start_time: startTime,
+    end_time: endTime,
+    limit: 100,
+  };
+
+  console.log("Running recent recovery/cycle sync:", {
+    whoopUserId,
+    startTime,
+    endTime,
+  });
+
+  const [recoveriesResp, cyclesResp] = await Promise.all([
+    getRecoveries(accessToken, params),
+    getCycles(accessToken, params),
+  ]);
+
+  const recoveryItems = toItems(recoveriesResp);
+  const cycleItems = toItems(cyclesResp);
+
+  for (const r of recoveryItems) {
+    const id = getId(r);
+    if (!id) continue;
+
+    await upsertRecovery({
+      id,
+      whoopUserId,
+      cycleId: r?.cycle_id ? String(r.cycle_id) : null,
+      raw: r,
+    });
+  }
+
+  for (const c of cycleItems) {
+    const id = getId(c);
+    if (!id) continue;
+
+    await upsertCycle({
+      id,
+      whoopUserId,
+      startTime: getStart(c),
+      endTime: getEnd(c),
+      raw: c,
+    });
+  }
+
+  console.log("Recent recovery/cycle sync complete:", {
+    whoopUserId,
+    recoveries: recoveryItems.length,
+    cycles: cycleItems.length,
+  });
 }
 
 async function fetchAndUpsert({ accessToken, whoopUserId, type, objectId }) {
@@ -109,25 +202,17 @@ async function fetchAndUpsert({ accessToken, whoopUserId, type, objectId }) {
   }
 
   if (type.startsWith("recovery")) {
-    console.log("Recovery webhook received. In v2 the webhook id is the associated sleep UUID:", objectId);
+    console.log(
+      "Recovery webhook received. In v2 the webhook id is the associated sleep UUID, so running recent recovery/cycle sync instead of fetch-by-id:",
+      objectId
+    );
 
-    // For now, fetch recovery by the same objectId only if your API/service supports it.
-    // If this fails, we’ll switch to a sleep->cycle->recovery flow in Step 2.
-    const r = await getRecoveryById(accessToken, objectId);
-    const obj = r?.record || r?.data || r;
-
-    console.log("Fetched recovery object id:", obj?.id);
-
-    const id = String(obj?.id || objectId);
-
-    await upsertRecovery({
-      id,
+    await syncRecentRecoveriesAndCycles({
+      accessToken,
       whoopUserId,
-      cycleId: obj?.cycle_id ? String(obj.cycle_id) : null,
-      raw: obj,
+      hours: 48,
     });
 
-    console.log("Upserted recovery:", id);
     return;
   }
 
@@ -160,7 +245,7 @@ exports.whoopWebhook = async (req, res) => {
 
     await saveWebhookEvent(event);
 
-    // Respond fast
+    // ACK fast
     res.status(200).json({ ok: true });
 
     // Async follow-up
