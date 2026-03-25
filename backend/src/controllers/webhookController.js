@@ -107,6 +107,7 @@ async function syncRecentRecoveriesAndCycles({ accessToken, whoopUserId, hours =
     whoopUserId,
     startTime,
     endTime,
+    params,
   });
 
   const [recoveriesResp, cyclesResp] = await Promise.all([
@@ -114,16 +115,30 @@ async function syncRecentRecoveriesAndCycles({ accessToken, whoopUserId, hours =
     getCycles(accessToken, params),
   ]);
 
+  console.log("Raw recoveries response:", JSON.stringify(recoveriesResp));
+  console.log("Raw cycles response:", JSON.stringify(cyclesResp));
+
   const recoveryItems = toItems(recoveriesResp);
   const cycleItems = toItems(cyclesResp);
+
+  console.log("Parsed recovery items count:", recoveryItems.length);
+  console.log("Parsed cycle items count:", cycleItems.length);
 
   for (const r of recoveryItems) {
     const cycleId = r?.cycle_id ? String(r.cycle_id) : null;
     const sleepId = r?.sleep_id ? String(r.sleep_id) : null;
 
-    // Use cycle_id as the recovery row primary id, fallback to sleep_id
     const id = cycleId || sleepId;
-    if (!id) continue;
+    if (!id) {
+      console.log("Skipping recovery row because no id/cycle_id/sleep_id:", JSON.stringify(r));
+      continue;
+    }
+
+    console.log("Upserting recovery row:", {
+      id,
+      cycleId,
+      sleepId,
+    });
 
     await upsertRecovery({
       id,
@@ -136,7 +151,16 @@ async function syncRecentRecoveriesAndCycles({ accessToken, whoopUserId, hours =
 
   for (const c of cycleItems) {
     const id = getId(c);
-    if (!id) continue;
+    if (!id) {
+      console.log("Skipping cycle row because no id:", JSON.stringify(c));
+      continue;
+    }
+
+    console.log("Upserting cycle row:", {
+      id,
+      start: getStart(c),
+      end: getEnd(c),
+    });
 
     await upsertCycle({
       id,
