@@ -87,8 +87,9 @@ function isoHoursAgo(hours) {
 }
 
 /**
- * WHOOP does not send cycle webhooks, and recovery.updated in v2 uses the associated
- * sleep UUID, not a recovery ID. So for recovery/cycle freshness we do a small recent sync.
+ * WHOOP does not send cycle webhooks.
+ * For recovery.updated in v2, the webhook id is the associated sleep UUID,
+ * not a recovery id. So for recovery/cycle freshness we do a small recent sync.
  */
 async function syncRecentRecoveriesAndCycles({ accessToken, whoopUserId, hours = 48 }) {
   const startTime = isoHoursAgo(hours);
@@ -117,13 +118,18 @@ async function syncRecentRecoveriesAndCycles({ accessToken, whoopUserId, hours =
   const cycleItems = toItems(cyclesResp);
 
   for (const r of recoveryItems) {
-    const id = getId(r);
+    const cycleId = r?.cycle_id ? String(r.cycle_id) : null;
+    const sleepId = r?.sleep_id ? String(r.sleep_id) : null;
+
+    // Use cycle_id as the recovery row primary id, fallback to sleep_id
+    const id = cycleId || sleepId;
     if (!id) continue;
 
     await upsertRecovery({
       id,
       whoopUserId,
-      cycleId: r?.cycle_id ? String(r.cycle_id) : null,
+      cycleId,
+      sleepId,
       raw: r,
     });
   }
