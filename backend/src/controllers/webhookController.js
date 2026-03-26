@@ -100,7 +100,7 @@ async function syncRecentRecoveriesAndCycles({ accessToken, whoopUserId, hours =
     end: endTime,
     start_time: startTime,
     end_time: endTime,
-    limit: 100,
+    limit: 25, // WHOOP requires <= 25
   };
 
   console.log("Running recent recovery/cycle sync:", {
