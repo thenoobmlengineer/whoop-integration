@@ -76,25 +76,45 @@ exports.backfill = async (req, res) => {
       end: endTime,
       start_time: startTime,
       end_time: endTime,
-      limit: 100,
+      limit: 25, // WHOOP requires <= 25
     };
 
-    const [workoutsResp, sleepsResp, recoveriesResp, cyclesResp] =
-      await Promise.all([
-        getWorkouts(accessToken, params),
-        getSleeps(accessToken, params),
-        getRecoveries(accessToken, params),
-        getCycles(accessToken, params),
-      ]);
+    console.log("BACKFILL params:", {
+      appUserId,
+      whoopUserId,
+      startTime,
+      endTime,
+      params,
+    });
+
+    const [workoutsResp, sleepsResp, recoveriesResp, cyclesResp] = await Promise.all([
+      getWorkouts(accessToken, params),
+      getSleeps(accessToken, params),
+      getRecoveries(accessToken, params),
+      getCycles(accessToken, params),
+    ]);
+
+    console.log("BACKFILL workoutsResp raw:", JSON.stringify(workoutsResp));
+    console.log("BACKFILL sleepsResp raw:", JSON.stringify(sleepsResp));
+    console.log("BACKFILL recoveriesResp raw:", JSON.stringify(recoveriesResp));
+    console.log("BACKFILL cyclesResp raw:", JSON.stringify(cyclesResp));
 
     const workoutItems = toItems(workoutsResp);
     const sleepItems = toItems(sleepsResp);
     const recoveryItems = toItems(recoveriesResp);
     const cycleItems = toItems(cyclesResp);
 
+    console.log("BACKFILL workoutItems count:", workoutItems.length);
+    console.log("BACKFILL sleepItems count:", sleepItems.length);
+    console.log("BACKFILL recoveryItems count:", recoveryItems.length);
+    console.log("BACKFILL cycleItems count:", cycleItems.length);
+
     for (const w of workoutItems) {
       const id = getId(w);
-      if (!id) continue;
+      if (!id) {
+        console.log("Skipping workout row because no id:", JSON.stringify(w));
+        continue;
+      }
 
       await upsertWorkout({
         id,
@@ -107,7 +127,10 @@ exports.backfill = async (req, res) => {
 
     for (const s of sleepItems) {
       const id = getId(s);
-      if (!id) continue;
+      if (!id) {
+        console.log("Skipping sleep row because no id:", JSON.stringify(s));
+        continue;
+      }
 
       await upsertSleep({
         id,
@@ -119,20 +142,31 @@ exports.backfill = async (req, res) => {
     }
 
     for (const r of recoveryItems) {
-      const id = getId(r);
-      if (!id) continue;
+      const cycleId = r?.cycle_id ? String(r.cycle_id) : null;
+      const sleepId = r?.sleep_id ? String(r.sleep_id) : null;
+
+      // Recovery objects often don't have top-level id; use cycle_id, fallback sleep_id
+      const id = cycleId || sleepId || getId(r);
+      if (!id) {
+        console.log("Skipping recovery row because no id/cycle_id/sleep_id:", JSON.stringify(r));
+        continue;
+      }
 
       await upsertRecovery({
         id,
         whoopUserId,
-        cycleId: r?.cycle_id ? String(r.cycle_id) : null,
+        cycleId,
+        sleepId,
         raw: r,
       });
     }
 
     for (const c of cycleItems) {
       const id = getId(c);
-      if (!id) continue;
+      if (!id) {
+        console.log("Skipping cycle row because no id:", JSON.stringify(c));
+        continue;
+      }
 
       await upsertCycle({
         id,
@@ -158,6 +192,7 @@ exports.backfill = async (req, res) => {
       },
     });
   } catch (err) {
+    console.error("BACKFILL error:", err?.response?.data || err.message);
     return res.status(500).json({ ok: false, error: err.message });
   }
 };
