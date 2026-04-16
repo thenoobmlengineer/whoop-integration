@@ -1,3 +1,4 @@
+const db = require("../db");
 const { getByAppUserId } = require("../repositories/whoopConnectionRepo");
 const {
   getSleeps,
@@ -76,7 +77,7 @@ exports.backfill = async (req, res) => {
       end: endTime,
       start_time: startTime,
       end_time: endTime,
-      limit: 25, // WHOOP requires <= 25
+      limit: 25,
     };
 
     console.log("BACKFILL params:", {
@@ -145,7 +146,6 @@ exports.backfill = async (req, res) => {
       const cycleId = r?.cycle_id ? String(r.cycle_id) : null;
       const sleepId = r?.sleep_id ? String(r.sleep_id) : null;
 
-      // Recovery objects often don't have top-level id; use cycle_id, fallback sleep_id
       const id = cycleId || sleepId || getId(r);
       if (!id) {
         console.log("Skipping recovery row because no id/cycle_id/sleep_id:", JSON.stringify(r));
@@ -193,6 +193,80 @@ exports.backfill = async (req, res) => {
     });
   } catch (err) {
     console.error("BACKFILL error:", err?.response?.data || err.message);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+};
+
+/**
+ * GET /whoop/summary?app_user_id=USER123
+ * Reads latest stored sleep/recovery/cycle rows from DB and returns raw payloads.
+ */
+exports.getSummary = async (req, res) => {
+  try {
+    const appUserId = (req.query.app_user_id || "").trim();
+    if (!appUserId) {
+      return res.status(400).json({ ok: false, error: "Missing app_user_id" });
+    }
+
+    const conn = await getByAppUserId(appUserId);
+    if (!conn) {
+      return res.status(404).json({ ok: false, error: "No WHOOP connection" });
+    }
+
+    const whoopUserId = String(conn.whoop_user_id);
+
+    const [recoveryRes, sleepRes, cycleRes] = await Promise.all([
+      db.query(
+        `
+        select raw, updated_at
+        from whoop_recoveries
+        where whoop_user_id = $1
+        order by updated_at desc
+        limit 1
+        `,
+        [whoopUserId]
+      ),
+      db.query(
+        `
+        select raw, updated_at
+        from whoop_sleeps
+        where whoop_user_id = $1
+        order by updated_at desc
+        limit 1
+        `,
+        [whoopUserId]
+      ),
+      db.query(
+        `
+        select raw, updated_at
+        from whoop_cycles
+        where whoop_user_id = $1
+        order by updated_at desc
+        limit 1
+        `,
+        [whoopUserId]
+      ),
+    ]);
+
+    const recovery = recoveryRes.rows[0]?.raw || null;
+    const sleep = sleepRes.rows[0]?.raw || null;
+    const cycle = cycleRes.rows[0]?.raw || null;
+
+    return res.json({
+      ok: true,
+      app_user_id: appUserId,
+      whoop_user_id: whoopUserId,
+      recovery,
+      sleep,
+      cycle,
+      updated_at:
+        recoveryRes.rows[0]?.updated_at ||
+        sleepRes.rows[0]?.updated_at ||
+        cycleRes.rows[0]?.updated_at ||
+        null,
+    });
+  } catch (err) {
+    console.error("SUMMARY error:", err?.response?.data || err.message);
     return res.status(500).json({ ok: false, error: err.message });
   }
 };
