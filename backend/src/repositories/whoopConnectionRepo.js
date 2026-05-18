@@ -171,10 +171,28 @@ async function updateTokensByWhoopUserId({
   return res.rows[0] || null;
 }
 
+/**
+ * Delete WHOOP connection by app user id.
+ * This removes OAuth tokens and disconnects the WHOOP account from the app user.
+ */
+async function deleteByAppUserId(appUserId) {
+  const res = await db.query(
+    `
+    delete from whoop_connections
+    where app_user_id = $1
+    returning app_user_id, whoop_user_id, updated_at;
+    `,
+    [String(appUserId)]
+  );
+
+  return res.rows[0] || null;
+}
+
 module.exports = {
   upsertConnection,
   getByAppUserId,
   getByWhoopUserId,
   updateTokensByAppUserId,
   updateTokensByWhoopUserId,
+  deleteByAppUserId,
 };
