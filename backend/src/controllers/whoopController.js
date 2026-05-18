@@ -1,5 +1,5 @@
 const db = require("../db");
-const { getByAppUserId } = require("../repositories/whoopConnectionRepo");
+const { getByAppUserId, deleteByAppUserId } = require("../repositories/whoopConnectionRepo");
 const {
   getSleeps,
   getWorkouts,
@@ -268,5 +268,39 @@ exports.getSummary = async (req, res) => {
   } catch (err) {
     console.error("SUMMARY error:", err?.response?.data || err.message);
     return res.status(500).json({ ok: false, error: err.message });
+  }
+};
+
+/**
+ * POST /whoop/disconnect?app_user_id=USER123
+ * Removes stored WHOOP OAuth connection for this app user.
+ */
+exports.disconnect = async (req, res) => {
+  try {
+    const appUserId = (req.query.app_user_id || "").trim();
+
+    if (!appUserId) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing app_user_id",
+      });
+    }
+
+    const deleted = await deleteByAppUserId(appUserId);
+
+    return res.json({
+      ok: true,
+      connected: false,
+      app_user_id: appUserId,
+      whoop_user_id: deleted?.whoop_user_id || null,
+      disconnected: !!deleted,
+    });
+  } catch (err) {
+    console.error("WHOOP disconnect error:", err?.message || err);
+
+    return res.status(500).json({
+      ok: false,
+      error: err.message || "Failed to disconnect WHOOP",
+    });
   }
 };
