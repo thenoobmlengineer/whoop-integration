@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 
 const { getByAppUserId } = require("../repositories/whoopConnectionRepo");
-const { backfill, getSummary } = require("../controllers/whoopController");
+const { backfill, getSummary, disconnect, } = require("../controllers/whoopController");
 
 // optional quick check
 router.get("/health", (req, res) => {
@@ -40,5 +40,6 @@ router.get("/connection", async (req, res) => {
 // Backfill past data into DB
 router.get("/summary", getSummary);
 router.post("/backfill", backfill);
+router.post("/disconnect", disconnect);
 
 module.exports = router;
