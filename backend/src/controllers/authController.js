@@ -6,6 +6,14 @@ const { upsertConnection } = require("../repositories/whoopConnectionRepo");
 
 const WHOOP_AUTH_BASE = "https://api.prod.whoop.com";
 
+function getPwaRedirectUrl(status) {
+  const frontendUrl = (
+    process.env.PWA_FRONTEND_URL || "https://zeamhealthappfrontend.netlify.app"
+  ).replace(/\/+$/, "");
+
+  return `${frontendUrl}/body?whoop=${encodeURIComponent(status)}`;
+}
+
 // --- helpers: signed OAuth state (Option B) ---
 function base64url(input) {
   return Buffer.from(input).toString("base64url");
@@ -105,12 +113,12 @@ exports.whoopCallback = async (req, res) => {
   try {
     const { code, state } = req.query;
 
-    if (!code) return res.status(400).send("Missing code");
-    if (!state) return res.status(400).send("Missing state");
+    if (!code) return res.redirect(303, getPwaRedirectUrl("failed"));
+    if (!state) return res.redirect(303, getPwaRedirectUrl("failed"));
 
     const decoded = verifyState(state);
     if (!decoded || !decoded.app_user_id) {
-      return res.status(400).json({ ok: false, error: "Invalid state" });
+      return res.redirect(303, getPwaRedirectUrl("failed");
     }
 
     const appUserId = decoded.app_user_id;
@@ -130,14 +138,14 @@ exports.whoopCallback = async (req, res) => {
     });
 
     const tokens = tokenResp.data;
-    console.log("WHOOP TOKEN RESPONSE:", tokens);
+    console.log("WHOOP token exchange successful for app_user_id:", appUserId);
     const accessToken = tokens.access_token;
     const refreshToken = tokens.refresh_token || null;
     const expiresIn = tokens.expires_in; // seconds
     const scopes = tokens.scope || process.env.WHOOP_SCOPES || null;
 
     if (!accessToken) {
-      return res.status(500).json({ ok: false, error: "Token exchange returned no access_token" });
+      return res.redirect(303, getPwaRedirectUrl("failed"));
     }
 
     // Fetch profile to get WHOOP user id (source of truth)
@@ -146,11 +154,8 @@ exports.whoopCallback = async (req, res) => {
     // WHOOP profile structure may vary; commonly has user_id
     const whoopUserId = profile?.user_id || profile?.id || profile?.user?.id;
     if (!whoopUserId) {
-      return res.status(500).json({
-        ok: false,
-        error: "Could not read whoop user id from profile",
-        profile,
-      });
+      console.error("Could not read WHOOP user id from profile:", profile);
+      return res.redirect(303, getPwaRedirectUrl("failed"));
     }
 
     const expiresAt =
@@ -168,20 +173,16 @@ exports.whoopCallback = async (req, res) => {
 
     // IMPORTANT: do not return tokens in production
     // For now return a simple success response.
-    return res.json({
-      ok: true,
-      connected: true,
-      app_user_id: appUserId,
-      whoop_user_id: String(whoopUserId),
-    });
+    return res.redirect(303, getPwaRedirectUrl("connected"));
   } catch (err) {
     const status = err?.response?.status || 500;
     const data = err?.response?.data || { message: err.message };
 
-    return res.status(status).json({
-      ok: false,
-      error: "Whoop callback failed",
+   console.error("Whoop callback failed:", {
+      status,
       details: data,
     });
+    
+    return res.redirect(303, getPwaRedirectUrl("failed"));
   }
 };
