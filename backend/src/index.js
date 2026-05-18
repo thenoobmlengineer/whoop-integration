@@ -95,8 +95,9 @@ app.get("/test/profile", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0"() => {
   console.log(`Backend running on http://localhost:${PORT}`);
+  console.log(`Listening to port 0.0.0.0`);
   console.log("Webhook endpoint: POST /webhook/whoop");
   console.log("Debug endpoint: GET /debug/whoop-events?key=...&limit=...");
   console.log("Whoop endpoint: GET /whoop/connection?app_user_id=...");
