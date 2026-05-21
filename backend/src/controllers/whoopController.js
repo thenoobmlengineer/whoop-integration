@@ -1,3 +1,4 @@
+// src/controllers/whoopController.js
 const db = require("../db");
 const { getByAppUserId, deleteByAppUserId } = require("../repositories/whoopConnectionRepo");
 const {
@@ -199,75 +200,156 @@ exports.backfill = async (req, res) => {
 
 /**
  * GET /whoop/summary?app_user_id=USER123
- * Reads latest stored sleep/recovery/cycle rows from DB and returns raw payloads.
+ * Returns a cycle-consistent WHOOP summary:
+ * selected cycle + recovery for same cycle + sleep for same cycle.
  */
 exports.getSummary = async (req, res) => {
   try {
-    const appUserId = (req.query.app_user_id || "").trim();
+    const appUserId = String(req.query.app_user_id || "").trim();
+
     if (!appUserId) {
       return res.status(400).json({ ok: false, error: "Missing app_user_id" });
     }
 
     const conn = await getByAppUserId(appUserId);
+
     if (!conn) {
       return res.status(404).json({ ok: false, error: "No WHOOP connection" });
     }
 
     const whoopUserId = String(conn.whoop_user_id);
 
-    const [recoveryRes, sleepRes, cycleRes] = await Promise.all([
-      db.query(
-        `
-        select raw, updated_at
-        from whoop_recoveries
-        where whoop_user_id = $1
-        order by updated_at desc
-        limit 1
-        `,
-        [whoopUserId]
-      ),
-      db.query(
-        `
-        select raw, updated_at
-        from whoop_sleeps
-        where whoop_user_id = $1
-        order by updated_at desc
-        limit 1
-        `,
-        [whoopUserId]
-      ),
-      db.query(
-        `
-        select raw, updated_at
-        from whoop_cycles
-        where whoop_user_id = $1
-        order by updated_at desc
-        limit 1
-        `,
-        [whoopUserId]
-      ),
-    ]);
+    /**
+     * 1) Pick the latest WHOOP cycle by actual cycle start time,
+     * not by DB updated_at.
+     *
+     * This avoids selecting an older cycle just because it was updated during backfill.
+     */
+    const cycleRes = await db.query(
+      `
+      select id, raw, start_time, end_time, updated_at
+      from whoop_cycles
+      where whoop_user_id = $1
+      order by
+        start_time desc nulls last,
+        updated_at desc
+      limit 1
+      `,
+      [whoopUserId]
+    );
 
-    const recovery = recoveryRes.rows[0]?.raw || null;
-    const sleep = sleepRes.rows[0]?.raw || null;
-    const cycle = cycleRes.rows[0]?.raw || null;
+    const cycleRow = cycleRes.rows[0] || null;
+    const cycle = cycleRow?.raw || null;
+
+    const selectedCycleId = cycleRow?.id
+      ? String(cycleRow.id)
+      : cycle?.id
+      ? String(cycle.id)
+      : cycle?.cycle_id
+      ? String(cycle.cycle_id)
+      : null;
+
+    if (!selectedCycleId) {
+      return res.json({
+        ok: true,
+        app_user_id: appUserId,
+        whoop_user_id: whoopUserId,
+        recovery: null,
+        sleep: null,
+        cycle: null,
+        updated_at: conn.updated_at || null,
+        debug: {
+          reason: "No WHOOP cycle found for this user.",
+        },
+      });
+    }
+
+    /**
+     * 2) Find recovery for the selected cycle.
+     *
+     * Your table already has cycle_id because upsertRecovery stores it.
+     */
+    const recoveryRes = await db.query(
+      `
+      select id, cycle_id, sleep_id, raw, updated_at
+      from whoop_recoveries
+      where whoop_user_id = $1
+        and cycle_id = $2
+      order by updated_at desc
+      limit 1
+      `,
+      [whoopUserId, selectedCycleId]
+    );
+
+    const recoveryRow = recoveryRes.rows[0] || null;
+    const recovery = recoveryRow?.raw || null;
+
+    /**
+     * 3) Find sleep for the same cycle.
+     *
+     * Your whoop_sleeps table does not currently store cycle_id as a separate column,
+     * so we read it from raw->>'cycle_id'.
+     */
+    const sleepRes = await db.query(
+      `
+      select id, raw, start_time, end_time, updated_at
+      from whoop_sleeps
+      where whoop_user_id = $1
+        and raw->>'cycle_id' = $2
+      order by
+        start_time desc nulls last,
+        updated_at desc
+      limit 1
+      `,
+      [whoopUserId, selectedCycleId]
+    );
+
+    const sleepRow = sleepRes.rows[0] || null;
+    const sleep = sleepRow?.raw || null;
 
     return res.json({
       ok: true,
       app_user_id: appUserId,
       whoop_user_id: whoopUserId,
+
       recovery,
       sleep,
       cycle,
+
       updated_at:
-        recoveryRes.rows[0]?.updated_at ||
-        sleepRes.rows[0]?.updated_at ||
-        cycleRes.rows[0]?.updated_at ||
+        recoveryRow?.updated_at ||
+        sleepRow?.updated_at ||
+        cycleRow?.updated_at ||
+        conn.updated_at ||
         null,
+
+      debug: {
+        selected_cycle_id: selectedCycleId,
+        cycle_row_id: cycleRow?.id ? String(cycleRow.id) : null,
+        cycle_start_time: cycleRow?.start_time || cycle?.start || cycle?.start_time || null,
+        cycle_end_time: cycleRow?.end_time || cycle?.end || cycle?.end_time || null,
+
+        recovery_found: !!recovery,
+        recovery_row_id: recoveryRow?.id ? String(recoveryRow.id) : null,
+        recovery_cycle_id: recoveryRow?.cycle_id ? String(recoveryRow.cycle_id) : null,
+        recovery_sleep_id: recoveryRow?.sleep_id ? String(recoveryRow.sleep_id) : null,
+
+        sleep_found: !!sleep,
+        sleep_row_id: sleepRow?.id ? String(sleepRow.id) : null,
+        sleep_cycle_id: sleep?.cycle_id ? String(sleep.cycle_id) : null,
+
+        cycle_score_state: cycle?.score_state || null,
+        recovery_score_state: recovery?.score_state || null,
+        sleep_score_state: sleep?.score_state || null,
+      },
     });
   } catch (err) {
     console.error("SUMMARY error:", err?.response?.data || err.message);
-    return res.status(500).json({ ok: false, error: err.message });
+
+    return res.status(500).json({
+      ok: false,
+      error: err.message || "Failed to fetch WHOOP summary",
+    });
   }
 };
 
