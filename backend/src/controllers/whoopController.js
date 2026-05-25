@@ -1,6 +1,12 @@
 // src/controllers/whoopController.js
 const db = require("../db");
-const { getByAppUserId, deleteByAppUserId } = require("../repositories/whoopConnectionRepo");
+const { table } = require("../db/schema");
+
+const {
+  getByAppUserId,
+  deleteByAppUserId,
+} = require("../repositories/whoopConnectionRepo");
+
 const {
   getSleeps,
   getWorkouts,
@@ -39,7 +45,13 @@ function getId(obj, fallback) {
 }
 
 function getStart(obj) {
-  return obj?.start_time || obj?.start || obj?.start_at || obj?.start_datetime || null;
+  return (
+    obj?.start_time ||
+    obj?.start ||
+    obj?.start_at ||
+    obj?.start_datetime ||
+    null
+  );
 }
 
 function getEnd(obj) {
@@ -48,27 +60,41 @@ function getEnd(obj) {
 
 /**
  * POST /whoop/backfill?app_user_id=USER123&days=30
- * Production default: 30 days
+ *
+ * Fetches WHOOP data from API and saves it into AWS tables:
+ * - zeam_platform.WhoopWorkout
+ * - zeam_platform.WhoopSleep
+ * - zeam_platform.WhoopRecovery
+ * - zeam_platform.WhoopCycle
  */
 exports.backfill = async (req, res) => {
   try {
-    const appUserId = (req.query.app_user_id || "").trim();
+    const appUserId = String(req.query.app_user_id || "").trim();
+
     if (!appUserId) {
-      return res.status(400).json({ ok: false, error: "Missing app_user_id" });
+      return res.status(400).json({
+        ok: false,
+        error: "Missing app_user_id",
+      });
     }
 
     let days = parseInt(req.query.days || "30", 10);
+
     if (Number.isNaN(days)) days = 30;
     if (days < 1) days = 1;
     if (days > 30) days = 30;
 
     const conn = await getByAppUserId(appUserId);
+
     if (!conn) {
-      return res.status(404).json({ ok: false, error: "No WHOOP connection" });
+      return res.status(404).json({
+        ok: false,
+        error: "No WHOOP connection",
+      });
     }
 
     const accessToken = await getValidAccessTokenForAppUser(conn);
-    const whoopUserId = conn.whoop_user_id;
+    const whoopUserId = String(conn.whoop_user_id);
 
     const startTime = isoDaysAgo(days);
     const endTime = new Date().toISOString();
@@ -81,38 +107,37 @@ exports.backfill = async (req, res) => {
       limit: 25,
     };
 
-    console.log("BACKFILL params:", {
+    console.log("WHOOP BACKFILL params:", {
       appUserId,
       whoopUserId,
       startTime,
       endTime,
-      params,
+      days,
     });
 
-    const [workoutsResp, sleepsResp, recoveriesResp, cyclesResp] = await Promise.all([
-      getWorkouts(accessToken, params),
-      getSleeps(accessToken, params),
-      getRecoveries(accessToken, params),
-      getCycles(accessToken, params),
-    ]);
-
-    console.log("BACKFILL workoutsResp raw:", JSON.stringify(workoutsResp));
-    console.log("BACKFILL sleepsResp raw:", JSON.stringify(sleepsResp));
-    console.log("BACKFILL recoveriesResp raw:", JSON.stringify(recoveriesResp));
-    console.log("BACKFILL cyclesResp raw:", JSON.stringify(cyclesResp));
+    const [workoutsResp, sleepsResp, recoveriesResp, cyclesResp] =
+      await Promise.all([
+        getWorkouts(accessToken, params),
+        getSleeps(accessToken, params),
+        getRecoveries(accessToken, params),
+        getCycles(accessToken, params),
+      ]);
 
     const workoutItems = toItems(workoutsResp);
     const sleepItems = toItems(sleepsResp);
     const recoveryItems = toItems(recoveriesResp);
     const cycleItems = toItems(cyclesResp);
 
-    console.log("BACKFILL workoutItems count:", workoutItems.length);
-    console.log("BACKFILL sleepItems count:", sleepItems.length);
-    console.log("BACKFILL recoveryItems count:", recoveryItems.length);
-    console.log("BACKFILL cycleItems count:", cycleItems.length);
+    console.log("WHOOP BACKFILL counts:", {
+      workouts: workoutItems.length,
+      sleeps: sleepItems.length,
+      recoveries: recoveryItems.length,
+      cycles: cycleItems.length,
+    });
 
     for (const w of workoutItems) {
       const id = getId(w);
+
       if (!id) {
         console.log("Skipping workout row because no id:", JSON.stringify(w));
         continue;
@@ -129,6 +154,7 @@ exports.backfill = async (req, res) => {
 
     for (const s of sleepItems) {
       const id = getId(s);
+
       if (!id) {
         console.log("Skipping sleep row because no id:", JSON.stringify(s));
         continue;
@@ -148,8 +174,12 @@ exports.backfill = async (req, res) => {
       const sleepId = r?.sleep_id ? String(r.sleep_id) : null;
 
       const id = cycleId || sleepId || getId(r);
+
       if (!id) {
-        console.log("Skipping recovery row because no id/cycle_id/sleep_id:", JSON.stringify(r));
+        console.log(
+          "Skipping recovery row because no id/cycle_id/sleep_id:",
+          JSON.stringify(r)
+        );
         continue;
       }
 
@@ -164,6 +194,7 @@ exports.backfill = async (req, res) => {
 
     for (const c of cycleItems) {
       const id = getId(c);
+
       if (!id) {
         console.log("Skipping cycle row because no id:", JSON.stringify(c));
         continue;
@@ -193,47 +224,67 @@ exports.backfill = async (req, res) => {
       },
     });
   } catch (err) {
-    console.error("BACKFILL error:", err?.response?.data || err.message);
-    return res.status(500).json({ ok: false, error: err.message });
+    console.error("WHOOP BACKFILL error:", err?.response?.data || err.message);
+
+    return res.status(500).json({
+      ok: false,
+      error: err.message || "Failed to backfill WHOOP data",
+      details: err?.response?.data || null,
+    });
   }
 };
 
 /**
  * GET /whoop/summary?app_user_id=USER123
- * Returns a cycle-consistent WHOOP summary:
- * selected cycle + recovery for same cycle + sleep for same cycle.
+ *
+ * Reads migrated AWS WHOOP data and returns:
+ * - latest cycle
+ * - recovery for same cycle
+ * - sleep for same cycle
  */
 exports.getSummary = async (req, res) => {
   try {
     const appUserId = String(req.query.app_user_id || "").trim();
 
     if (!appUserId) {
-      return res.status(400).json({ ok: false, error: "Missing app_user_id" });
+      return res.status(400).json({
+        ok: false,
+        error: "Missing app_user_id",
+      });
     }
 
     const conn = await getByAppUserId(appUserId);
 
     if (!conn) {
-      return res.status(404).json({ ok: false, error: "No WHOOP connection" });
+      return res.status(404).json({
+        ok: false,
+        error: "No WHOOP connection",
+      });
     }
 
     const whoopUserId = String(conn.whoop_user_id);
 
-    /**
-     * 1) Pick the latest WHOOP cycle by actual cycle start time,
-     * not by DB updated_at.
-     *
-     * This avoids selecting an older cycle just because it was updated during backfill.
-     */
     const cycleRes = await db.query(
       `
-      select id, raw, start_time, end_time, updated_at
-      from whoop_cycles
-      where whoop_user_id = $1
-      order by
-        start_time desc nulls last,
-        updated_at desc
-      limit 1
+      SELECT
+        wc.id,
+        wc."externalId",
+        wc."rawPayload" AS raw,
+        wc.start AS start_time,
+        wc."end" AS end_time,
+        wc.strain,
+        wc.kilojoule,
+        wc."updatedAt" AS updated_at
+      FROM ${table("WhoopCycle")} wc
+      JOIN ${table("PatientDeviceConnection")} pdc
+        ON pdc.id = wc."connectionId"
+      WHERE pdc."externalUserId" = $1
+        AND pdc.type = 'WHOOP'
+        AND pdc."archivedAt" IS NULL
+      ORDER BY
+        wc.start DESC NULLS LAST,
+        wc."updatedAt" DESC
+      LIMIT 1
       `,
       [whoopUserId]
     );
@@ -241,8 +292,8 @@ exports.getSummary = async (req, res) => {
     const cycleRow = cycleRes.rows[0] || null;
     const cycle = cycleRow?.raw || null;
 
-    const selectedCycleId = cycleRow?.id
-      ? String(cycleRow.id)
+    const selectedCycleId = cycleRow?.externalId
+      ? String(cycleRow.externalId)
       : cycle?.id
       ? String(cycle.id)
       : cycle?.cycle_id
@@ -264,19 +315,34 @@ exports.getSummary = async (req, res) => {
       });
     }
 
-    /**
-     * 2) Find recovery for the selected cycle.
-     *
-     * Your table already has cycle_id because upsertRecovery stores it.
-     */
     const recoveryRes = await db.query(
       `
-      select id, cycle_id, sleep_id, raw, updated_at
-      from whoop_recoveries
-      where whoop_user_id = $1
-        and cycle_id = $2
-      order by updated_at desc
-      limit 1
+      SELECT
+        wr.id,
+        wr."externalId",
+        wr."rawPayload" AS raw,
+        wr.score,
+        wr."restingHeartRate",
+        wr."hrvRmssdMs",
+        wr."respiratoryRate",
+        wr."spo2Percent",
+        wr."skinTempCelsius",
+        wr."createdAtWhoop",
+        wr."updatedAt" AS updated_at
+      FROM ${table("WhoopRecovery")} wr
+      JOIN ${table("PatientDeviceConnection")} pdc
+        ON pdc.id = wr."connectionId"
+      WHERE pdc."externalUserId" = $1
+        AND pdc.type = 'WHOOP'
+        AND pdc."archivedAt" IS NULL
+        AND (
+          wr."externalId" = $2
+          OR wr."rawPayload"->>'cycle_id' = $2
+        )
+      ORDER BY
+        wr."createdAtWhoop" DESC NULLS LAST,
+        wr."updatedAt" DESC
+      LIMIT 1
       `,
       [whoopUserId, selectedCycleId]
     );
@@ -284,22 +350,33 @@ exports.getSummary = async (req, res) => {
     const recoveryRow = recoveryRes.rows[0] || null;
     const recovery = recoveryRow?.raw || null;
 
-    /**
-     * 3) Find sleep for the same cycle.
-     *
-     * Your whoop_sleeps table does not currently store cycle_id as a separate column,
-     * so we read it from raw->>'cycle_id'.
-     */
     const sleepRes = await db.query(
       `
-      select id, raw, start_time, end_time, updated_at
-      from whoop_sleeps
-      where whoop_user_id = $1
-        and raw->>'cycle_id' = $2
-      order by
-        start_time desc nulls last,
-        updated_at desc
-      limit 1
+      SELECT
+        ws.id,
+        ws."externalId",
+        ws."rawPayload" AS raw,
+        ws.start AS start_time,
+        ws."end" AS end_time,
+        ws."totalSleepMs",
+        ws."sleepEfficiency",
+        ws."sleepPerformance",
+        ws."remMs",
+        ws."slowWaveMs",
+        ws."lightMs",
+        ws."wakeMs",
+        ws."updatedAt" AS updated_at
+      FROM ${table("WhoopSleep")} ws
+      JOIN ${table("PatientDeviceConnection")} pdc
+        ON pdc.id = ws."connectionId"
+      WHERE pdc."externalUserId" = $1
+        AND pdc.type = 'WHOOP'
+        AND pdc."archivedAt" IS NULL
+        AND ws."rawPayload"->>'cycle_id' = $2
+      ORDER BY
+        ws.start DESC NULLS LAST,
+        ws."updatedAt" DESC
+      LIMIT 1
       `,
       [whoopUserId, selectedCycleId]
     );
@@ -316,6 +393,44 @@ exports.getSummary = async (req, res) => {
       sleep,
       cycle,
 
+      normalized: {
+        cycle: cycleRow
+          ? {
+              external_id: cycleRow.externalId,
+              start_time: cycleRow.start_time,
+              end_time: cycleRow.end_time,
+              strain: cycleRow.strain,
+              kilojoule: cycleRow.kilojoule,
+            }
+          : null,
+        recovery: recoveryRow
+          ? {
+              external_id: recoveryRow.externalId,
+              score: recoveryRow.score,
+              resting_heart_rate: recoveryRow.restingHeartRate,
+              hrv_rmssd_ms: recoveryRow.hrvRmssdMs,
+              respiratory_rate: recoveryRow.respiratoryRate,
+              spo2_percent: recoveryRow.spo2Percent,
+              skin_temp_celsius: recoveryRow.skinTempCelsius,
+              created_at_whoop: recoveryRow.createdAtWhoop,
+            }
+          : null,
+        sleep: sleepRow
+          ? {
+              external_id: sleepRow.externalId,
+              start_time: sleepRow.start_time,
+              end_time: sleepRow.end_time,
+              total_sleep_ms: sleepRow.totalSleepMs,
+              sleep_efficiency: sleepRow.sleepEfficiency,
+              sleep_performance: sleepRow.sleepPerformance,
+              rem_ms: sleepRow.remMs,
+              deep_sleep_ms: sleepRow.slowWaveMs,
+              light_sleep_ms: sleepRow.lightMs,
+              awake_ms: sleepRow.wakeMs,
+            }
+          : null,
+      },
+
       updated_at:
         recoveryRow?.updated_at ||
         sleepRow?.updated_at ||
@@ -325,17 +440,30 @@ exports.getSummary = async (req, res) => {
 
       debug: {
         selected_cycle_id: selectedCycleId,
+
+        cycle_found: !!cycle,
         cycle_row_id: cycleRow?.id ? String(cycleRow.id) : null,
-        cycle_start_time: cycleRow?.start_time || cycle?.start || cycle?.start_time || null,
-        cycle_end_time: cycleRow?.end_time || cycle?.end || cycle?.end_time || null,
+        cycle_external_id: cycleRow?.externalId
+          ? String(cycleRow.externalId)
+          : null,
+        cycle_start_time:
+          cycleRow?.start_time || cycle?.start || cycle?.start_time || null,
+        cycle_end_time:
+          cycleRow?.end_time || cycle?.end || cycle?.end_time || null,
 
         recovery_found: !!recovery,
         recovery_row_id: recoveryRow?.id ? String(recoveryRow.id) : null,
-        recovery_cycle_id: recoveryRow?.cycle_id ? String(recoveryRow.cycle_id) : null,
-        recovery_sleep_id: recoveryRow?.sleep_id ? String(recoveryRow.sleep_id) : null,
+        recovery_external_id: recoveryRow?.externalId
+          ? String(recoveryRow.externalId)
+          : null,
+        recovery_cycle_id: recovery?.cycle_id ? String(recovery.cycle_id) : null,
+        recovery_sleep_id: recovery?.sleep_id ? String(recovery.sleep_id) : null,
 
         sleep_found: !!sleep,
         sleep_row_id: sleepRow?.id ? String(sleepRow.id) : null,
+        sleep_external_id: sleepRow?.externalId
+          ? String(sleepRow.externalId)
+          : null,
         sleep_cycle_id: sleep?.cycle_id ? String(sleep.cycle_id) : null,
 
         cycle_score_state: cycle?.score_state || null,
@@ -344,22 +472,25 @@ exports.getSummary = async (req, res) => {
       },
     });
   } catch (err) {
-    console.error("SUMMARY error:", err?.response?.data || err.message);
+    console.error("WHOOP SUMMARY error:", err?.response?.data || err.message);
 
     return res.status(500).json({
       ok: false,
       error: err.message || "Failed to fetch WHOOP summary",
+      details: err?.response?.data || null,
     });
   }
 };
 
 /**
  * POST /whoop/disconnect?app_user_id=USER123
- * Removes stored WHOOP OAuth connection for this app user.
+ *
+ * Marks WHOOP connection as disconnected in AWS.
+ * Does not delete historical WHOOP data.
  */
 exports.disconnect = async (req, res) => {
   try {
-    const appUserId = (req.query.app_user_id || "").trim();
+    const appUserId = String(req.query.app_user_id || "").trim();
 
     if (!appUserId) {
       return res.status(400).json({
@@ -368,14 +499,14 @@ exports.disconnect = async (req, res) => {
       });
     }
 
-    const deleted = await deleteByAppUserId(appUserId);
+    const disconnected = await deleteByAppUserId(appUserId);
 
     return res.json({
       ok: true,
       connected: false,
       app_user_id: appUserId,
-      whoop_user_id: deleted?.whoop_user_id || null,
-      disconnected: !!deleted,
+      whoop_user_id: disconnected?.whoop_user_id || null,
+      disconnected: !!disconnected,
     });
   } catch (err) {
     console.error("WHOOP disconnect error:", err?.message || err);

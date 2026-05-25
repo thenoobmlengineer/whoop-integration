@@ -1,5 +1,7 @@
+// src/controllers/webhookController.js
 const crypto = require("crypto");
 const db = require("../db");
+const { table } = require("../db/schema");
 
 const { getByWhoopUserId } = require("../repositories/whoopConnectionRepo");
 const {
@@ -18,30 +20,62 @@ const {
 
 const { getValidAccessTokenForWhoopUser } = require("../services/whoopTokenService");
 
-// WHOOP headers
+// WHOOP webhook headers
 const SIG_HEADER = "x-whoop-signature";
 const TS_HEADER = "x-whoop-signature-timestamp";
 
 function timingSafeEqual(a, b) {
   const aBuf = Buffer.from(a || "", "utf8");
   const bBuf = Buffer.from(b || "", "utf8");
+
   if (aBuf.length !== bBuf.length) return false;
+
   return crypto.timingSafeEqual(aBuf, bBuf);
 }
 
-function verifyWhoopSignature({ clientSecret, timestamp, rawBody, providedSignature }) {
-  if (!clientSecret || !timestamp || !rawBody || !providedSignature) return false;
+function verifyWhoopSignature({
+  clientSecret,
+  timestamp,
+  rawBody,
+  providedSignature,
+}) {
+  if (!clientSecret || !timestamp || !rawBody || !providedSignature) {
+    return false;
+  }
 
   const message = Buffer.concat([Buffer.from(timestamp, "utf8"), rawBody]);
-  const hmac = crypto.createHmac("sha256", clientSecret).update(message).digest("base64");
 
-  return timingSafeEqual(hmac, providedSignature);
+  const expectedSignature = crypto
+    .createHmac("sha256", clientSecret)
+    .update(message)
+    .digest("base64");
+
+  return timingSafeEqual(expectedSignature, providedSignature);
 }
 
+function makeWebhookEventId(event) {
+  const raw = [
+    event.trace_id || "",
+    event.user_id || "",
+    event.type || "",
+    event.id || event.object_id || "",
+  ].join(":");
+
+  return crypto.createHash("sha1").update(raw).digest("hex");
+}
+
+/**
+ * Saves webhook event to AWS schema.
+ *
+ * Important:
+ * This is non-critical logging. If the table does not exist yet,
+ * the webhook should still continue and sync WHOOP data.
+ */
 async function saveWebhookEvent(event) {
   const traceId = event.trace_id || null;
   const whoopUserId = String(event.user_id || "");
   const type = event.type || null;
+
   const objectId = event.id
     ? String(event.id)
     : event.object_id
@@ -49,12 +83,33 @@ async function saveWebhookEvent(event) {
     : null;
 
   const sql = `
-    insert into whoop_webhook_events (trace_id, whoop_user_id, type, object_id, payload, received_at)
-    values ($1,$2,$3,$4,$5,now())
-    on conflict do nothing
+    INSERT INTO ${table("WhoopWebhookEvent")} (
+      id,
+      "traceId",
+      "whoopUserId",
+      type,
+      "objectId",
+      payload,
+      "receivedAt"
+    )
+    VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW())
+    ON CONFLICT (id) DO NOTHING
   `;
 
-  await db.query(sql, [traceId, whoopUserId, type, objectId, event]);
+  try {
+    await db.query(sql, [
+      makeWebhookEventId(event),
+      traceId,
+      whoopUserId,
+      type,
+      objectId,
+      JSON.stringify(event),
+    ]);
+  } catch (err) {
+    // 42P01 = undefined_table
+    // We do not fail the webhook if optional logging table is missing.
+    console.warn("WHOOP webhook event log skipped:", err.message);
+  }
 }
 
 function toItems(resp) {
@@ -75,7 +130,13 @@ function getId(obj, fallback) {
 }
 
 function getStart(obj) {
-  return obj?.start_time || obj?.start || obj?.start_at || obj?.start_datetime || null;
+  return (
+    obj?.start_time ||
+    obj?.start ||
+    obj?.start_at ||
+    obj?.start_datetime ||
+    null
+  );
 }
 
 function getEnd(obj) {
@@ -88,10 +149,16 @@ function isoHoursAgo(hours) {
 
 /**
  * WHOOP does not send cycle webhooks.
- * For recovery.updated in v2, the webhook id is the associated sleep UUID,
- * not a recovery id. So for recovery/cycle freshness we do a small recent sync.
+ *
+ * For recovery.updated in WHOOP v2, the webhook id can be the associated
+ * sleep UUID rather than a recovery id. So for recovery freshness we sync
+ * recent recoveries and cycles.
  */
-async function syncRecentRecoveriesAndCycles({ accessToken, whoopUserId, hours = 48 }) {
+async function syncRecentRecoveriesAndCycles({
+  accessToken,
+  whoopUserId,
+  hours = 48,
+}) {
   const startTime = isoHoursAgo(hours);
   const endTime = new Date().toISOString();
 
@@ -100,14 +167,13 @@ async function syncRecentRecoveriesAndCycles({ accessToken, whoopUserId, hours =
     end: endTime,
     start_time: startTime,
     end_time: endTime,
-    limit: 25, // WHOOP requires <= 25
+    limit: 25,
   };
 
-  console.log("Running recent recovery/cycle sync:", {
+  console.log("Running recent WHOOP recovery/cycle sync:", {
     whoopUserId,
     startTime,
     endTime,
-    params,
   });
 
   const [recoveriesResp, cyclesResp] = await Promise.all([
@@ -115,30 +181,27 @@ async function syncRecentRecoveriesAndCycles({ accessToken, whoopUserId, hours =
     getCycles(accessToken, params),
   ]);
 
-  console.log("Raw recoveries response:", JSON.stringify(recoveriesResp));
-  console.log("Raw cycles response:", JSON.stringify(cyclesResp));
-
   const recoveryItems = toItems(recoveriesResp);
   const cycleItems = toItems(cyclesResp);
 
-  console.log("Parsed recovery items count:", recoveryItems.length);
-  console.log("Parsed cycle items count:", cycleItems.length);
+  console.log("Recent WHOOP sync counts:", {
+    recoveries: recoveryItems.length,
+    cycles: cycleItems.length,
+  });
 
   for (const r of recoveryItems) {
     const cycleId = r?.cycle_id ? String(r.cycle_id) : null;
     const sleepId = r?.sleep_id ? String(r.sleep_id) : null;
 
-    const id = cycleId || sleepId;
+    const id = cycleId || sleepId || getId(r);
+
     if (!id) {
-      console.log("Skipping recovery row because no id/cycle_id/sleep_id:", JSON.stringify(r));
+      console.log(
+        "Skipping recovery row because no id/cycle_id/sleep_id:",
+        JSON.stringify(r)
+      );
       continue;
     }
-
-    console.log("Upserting recovery row:", {
-      id,
-      cycleId,
-      sleepId,
-    });
 
     await upsertRecovery({
       id,
@@ -151,16 +214,11 @@ async function syncRecentRecoveriesAndCycles({ accessToken, whoopUserId, hours =
 
   for (const c of cycleItems) {
     const id = getId(c);
+
     if (!id) {
       console.log("Skipping cycle row because no id:", JSON.stringify(c));
       continue;
     }
-
-    console.log("Upserting cycle row:", {
-      id,
-      start: getStart(c),
-      end: getEnd(c),
-    });
 
     await upsertCycle({
       id,
@@ -171,7 +229,7 @@ async function syncRecentRecoveriesAndCycles({ accessToken, whoopUserId, hours =
     });
   }
 
-  console.log("Recent recovery/cycle sync complete:", {
+  console.log("Recent WHOOP recovery/cycle sync complete:", {
     whoopUserId,
     recoveries: recoveryItems.length,
     cycles: cycleItems.length,
@@ -179,7 +237,7 @@ async function syncRecentRecoveriesAndCycles({ accessToken, whoopUserId, hours =
 }
 
 async function fetchAndUpsert({ accessToken, whoopUserId, type, objectId }) {
-  console.log("fetchAndUpsert called with:", {
+  console.log("WHOOP fetchAndUpsert:", {
     whoopUserId,
     type,
     objectId,
@@ -188,52 +246,44 @@ async function fetchAndUpsert({ accessToken, whoopUserId, type, objectId }) {
   if (!type || !objectId) return;
 
   if (type.startsWith("workout")) {
-    console.log("Fetching workout by id:", objectId);
+    const workoutResp = await getWorkoutById(accessToken, objectId);
+    const workout = workoutResp?.record || workoutResp?.data || workoutResp;
 
-    const w = await getWorkoutById(accessToken, objectId);
-    const obj = w?.record || w?.data || w;
-
-    console.log("Fetched workout object id:", obj?.id);
-
-    const id = String(obj?.id || objectId);
+    const id = String(workout?.id || objectId);
 
     await upsertWorkout({
       id,
       whoopUserId,
-      startTime: obj?.start_time || obj?.start || null,
-      endTime: obj?.end_time || obj?.end || null,
-      raw: obj,
+      startTime: getStart(workout),
+      endTime: getEnd(workout),
+      raw: workout,
     });
 
-    console.log("Upserted workout:", id);
+    console.log("WHOOP workout upserted:", id);
     return;
   }
 
   if (type.startsWith("sleep")) {
-    console.log("Fetching sleep by id:", objectId);
+    const sleepResp = await getSleepById(accessToken, objectId);
+    const sleep = sleepResp?.record || sleepResp?.data || sleepResp;
 
-    const s = await getSleepById(accessToken, objectId);
-    const obj = s?.record || s?.data || s;
-
-    console.log("Fetched sleep object id:", obj?.id);
-
-    const id = String(obj?.id || objectId);
+    const id = String(sleep?.id || objectId);
 
     await upsertSleep({
       id,
       whoopUserId,
-      startTime: obj?.start_time || obj?.start || null,
-      endTime: obj?.end_time || obj?.end || null,
-      raw: obj,
+      startTime: getStart(sleep),
+      endTime: getEnd(sleep),
+      raw: sleep,
     });
 
-    console.log("Upserted sleep:", id);
+    console.log("WHOOP sleep upserted:", id);
     return;
   }
 
   if (type.startsWith("recovery")) {
     console.log(
-      "Recovery webhook received. In v2 the webhook id is the associated sleep UUID, so running recent recovery/cycle sync instead of fetch-by-id:",
+      "WHOOP recovery webhook received. Running recent recovery/cycle sync:",
       objectId
     );
 
@@ -246,7 +296,7 @@ async function fetchAndUpsert({ accessToken, whoopUserId, type, objectId }) {
     return;
   }
 
-  console.log("Webhook type not handled in fetchAndUpsert:", type);
+  console.log("WHOOP webhook type not handled:", type);
 }
 
 exports.whoopWebhook = async (req, res) => {
@@ -258,30 +308,35 @@ exports.whoopWebhook = async (req, res) => {
     const isManualTest = req.query?.test === "1" || req.body?.test === true;
 
     if (!isManualTest) {
-      const ok = verifyWhoopSignature({
+      const isValidSignature = verifyWhoopSignature({
         clientSecret: process.env.WHOOP_CLIENT_SECRET,
         timestamp,
         rawBody,
         providedSignature,
       });
 
-      if (!ok) {
-        return res.status(401).json({ ok: false, error: "Invalid WHOOP signature" });
+      if (!isValidSignature) {
+        return res.status(401).json({
+          ok: false,
+          error: "Invalid WHOOP signature",
+        });
       }
     }
 
     const event = req.body;
+
     console.log("WHOOP webhook received:", JSON.stringify(event));
 
     await saveWebhookEvent(event);
 
-    // ACK fast
+    // ACK quickly so WHOOP does not retry because of slow processing.
     res.status(200).json({ ok: true });
 
-    // Async follow-up
+    // Continue processing after ACK.
     try {
       const whoopUserId = String(event.user_id || "");
       const type = event.type || "";
+
       const objectId = event.id
         ? String(event.id)
         : event.object_id
@@ -289,11 +344,14 @@ exports.whoopWebhook = async (req, res) => {
         : null;
 
       if (!whoopUserId || !type || !objectId) {
-        console.log("Webhook missing whoopUserId/type/objectId. Skipping follow-up.");
+        console.log(
+          "WHOOP webhook missing whoopUserId/type/objectId. Skipping follow-up."
+        );
         return;
       }
 
       const conn = await getByWhoopUserId(whoopUserId);
+
       if (!conn) {
         console.log("No WHOOP connection found for whoop_user_id:", whoopUserId);
         return;
@@ -307,11 +365,18 @@ exports.whoopWebhook = async (req, res) => {
         type,
         objectId,
       });
-    } catch (e) {
-      console.error("Webhook follow-up fetch failed:", e?.response?.data || e.message);
+    } catch (err) {
+      console.error(
+        "WHOOP webhook follow-up fetch failed:",
+        err?.response?.data || err.message
+      );
     }
   } catch (err) {
-    console.error("Webhook error:", err);
-    return res.status(500).json({ ok: false, error: "Server error" });
+    console.error("WHOOP webhook error:", err);
+
+    return res.status(500).json({
+      ok: false,
+      error: "Server error",
+    });
   }
 };

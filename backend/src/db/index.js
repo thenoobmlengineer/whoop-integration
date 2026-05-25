@@ -1,3 +1,4 @@
+// src/db/index.js
 const { Pool } = require("pg");
 
 let pool;
