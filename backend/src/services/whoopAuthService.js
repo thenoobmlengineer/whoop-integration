@@ -1,3 +1,4 @@
+//src/services/whoopAuthService.js
 const axios = require("axios");
 
 const WHOOP_AUTH_BASE = "https://api.prod.whoop.com";
